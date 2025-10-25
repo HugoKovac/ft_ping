@@ -14,7 +14,7 @@ $(TARGET): $(OBJ)
 
 $(OBJ): $(SRC)
 	@mkdir -p $(OBJ_DIR)
-	gcc -c $(SRC) -o $(OBJ_DIR)/$(@F)
+	gcc -Wall -Werror -Wextra -c $(SRC) -o $(OBJ_DIR)/$(@F)
 
 .PHONY: all clean fclean run
 
