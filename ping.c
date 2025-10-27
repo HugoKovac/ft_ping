@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <sys/types.h>
+#include <stdio.h>
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/ip_icmp.h>
@@ -9,6 +11,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include "argp.h"
 
 int volatile stop = 0;
 
@@ -34,9 +37,69 @@ unsigned short checksum(void *b, int len)
     return result;
 }
 
-int main()
+// static int opt_ttl = 64;
+
+static void print_help(const char *progname)
 {
-    printf("Hello ping!\n");
+    printf("Usage: %s [OPTIONS] DESTINATION\n", progname);
+    printf("Send ICMP ECHO_REQUEST to network hosts.\n\n");
+    printf("Options:\n");
+    // printf("  -t, --ttl=TTL       Set IP TTL (default %d)\n", opt_ttl);
+    printf("  -?, --help          Display this help and exit\n");
+}
+
+static int parse_opt(int key, const char *arg, struct argp_state *state)
+{
+    (void)state;
+    (void)arg;
+    switch (key)
+    {
+    // case 't':
+    //     if (!arg)
+    //     {
+    //         fprintf(stderr, "--ttl requires a value\n");
+    //         return ARGP_ERR_ARG;
+    //     }
+    //     opt_ttl = atoi(arg);
+    //     if (opt_ttl <= 0 || opt_ttl > 255)
+    //     {
+    //         fprintf(stderr, "invalid ttl: %s\n", arg);
+    //         return ARGP_ERR_ARG;
+    //     }
+    //     break;
+    case '?':
+        print_help(state->argv[0]);
+        exit(0);
+        break;
+    default:
+        return 0;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    const struct argp_option options[] = {
+        {"ttl", 't', ARGP_REQUIRED_ARG, "Set IP TTL", 0},
+        {"help", '?', ARGP_NO_ARG, "Display this help", 0},
+        {NULL, 0, 0, NULL, 0}};
+
+    const struct argp argp = {options, parse_opt, "DEST", "ft_ping: send ICMP ECHO_REQUEST to network hosts"};
+
+    int arg_index = 0;
+    if (argp_parse(&argp, argc, argv, &arg_index, NULL) != ARGP_SUCCESS)
+    {
+        return EXIT_FAILURE;
+    }
+
+    if (arg_index >= argc)
+    {
+        print_help(argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    const char *dest = argv[arg_index];
+
     int sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP); // DGRAM doesn't require root privileges
     if (sockfd == -1)
     {
@@ -44,23 +107,38 @@ int main()
         exit(EXIT_FAILURE);
     }
 
-    
     struct sockaddr_in addr;
-    
+
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = 0;
-    inet_pton(AF_INET, "8.8.8.8", &addr.sin_addr);
-    
-    if (setsockopt(sockfd, IPPROTO_IP, IP_TTL, &addr, sizeof(addr)) < 0){
-        perror("setsockopt");
+    if (inet_pton(AF_INET, dest, &addr.sin_addr) != 1)
+    {
+        fprintf(stderr, "Invalid destination address: %s\n", dest);
+        close(sockfd);
+        return EXIT_FAILURE;
     }
-    
+
+    // int broadcastEnable = 1;
+    // if (setsockopt(sockfd, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, sizeof(broadcastEnable)) < 0)
+    // {
+    //     perror("setsockopt");
+    //     close(sockfd);
+    //     exit(EXIT_FAILURE);
+    // }
+
+    // if (setsockopt(sockfd, IPPROTO_IP, IP_TTL, &opt_ttl, sizeof(opt_ttl)) < 0)
+    // {
+    //     perror("setsockopt");
+    //     close(sockfd);
+    //     exit(EXIT_FAILURE);
+    // }
+
     int seq = 0;
     while (!stop)
     {
         struct icmp icmp_hdr;
-    
+
         icmp_hdr.icmp_type = ICMP_ECHO;
         icmp_hdr.icmp_code = 0;
         icmp_hdr.icmp_cksum = 0;
@@ -104,9 +182,13 @@ int main()
 
         if (icmp_reply->icmp_type == ICMP_ECHOREPLY)
         {
-            printf("id=%d seq=%d\n",
-                    ntohs(icmp_reply->icmp_hun.ih_idseq.icd_id),
-                    ntohs(icmp_reply->icmp_hun.ih_idseq.icd_seq));
+            printf("%d bytes from %s: icmp_seq=%u", 0, inet_ntoa(*(struct in_addr *)&reply_addr.sin_addr.s_addr), ntohs(icmp_reply->icmp_seq));
+            printf(" ttl=%d", ip_hdr->ip_ttl);
+            printf("\n");
+            // printf("id=%d seq=%d ttl=%d\n",
+            //        ntohs(icmp_reply->icmp_hun.ih_idseq.icd_id),
+            //        ntohs(icmp_reply->icmp_hun.ih_idseq.icd_seq),
+            //        ip_hdr->ip_ttl);
         }
         else
         {

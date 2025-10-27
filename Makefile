@@ -1,6 +1,6 @@
 TARGET=ft_ping
 
-SRC=ping.c
+SRC=ping.c argp.c
 
 OBJ_DIR=objs
 OBJ=$(patsubst %.c,$(OBJ_DIR)/%.o,$(SRC))
@@ -12,14 +12,14 @@ all: $(TARGET)
 $(TARGET): $(OBJ)
 	gcc $(OBJ) -o $(TARGET)
 
-$(OBJ): $(SRC)
+$(OBJ_DIR)/%.o: %.c
 	@mkdir -p $(OBJ_DIR)
-	gcc -Wall -Werror -Wextra -c $(SRC) -o $(OBJ_DIR)/$(@F)
+	gcc -Wall -Werror -Wextra -c $< -o $@
 
 .PHONY: all clean fclean run
 
 run: $(TARGET)
-	@./$(TARGET)
+	@./$(TARGET) $(arg)
 
 test_ref:
 	@docker build --platform linux/amd64 -t inetutils:2.0 .
