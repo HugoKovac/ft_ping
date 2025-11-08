@@ -1,6 +1,6 @@
 TARGET=ft_ping
 
-SRC=ping.c argp.c
+SRC=ping.c argp.c utils.c cli.c
 
 OBJ_DIR=objs
 OBJ=$(patsubst %.c,$(OBJ_DIR)/%.o,$(SRC))
@@ -28,6 +28,10 @@ test_ref:
 test:
 	@docker build --platform linux/amd64 -f Dockerfile.test -t ft_ping:test .
 	@docker run --platform linux/amd64 --rm --init -it ft_ping:test /app/ft_ping $(arg)
+
+valgrind:
+	@docker build --platform linux/amd64 -f Dockerfile.test -t ft_ping:test .
+	@docker run --platform linux/amd64 --rm --init -it --ulimit nofile=1048576:1048576 --cap-add=NET_RAW --cap-add=SYS_PTRACE --security-opt seccomp=unconfined ft_ping:test valgrind --leak-check=full ./ft_ping $(arg)
 
 clean:
 	rm -f $(OBJ) $(TARGET)

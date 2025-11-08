@@ -12,191 +12,91 @@
 #include <string.h>
 #include <signal.h>
 #include <netdb.h>
-#include "argp.h"
 #include <errno.h>
 #include <math.h>
+#include "argp.h"
+#include "ping.h"
 
-int volatile stop = 0;
-
-void sig_int(int signal)
+static int resolve_destination(const char *dest, struct sockaddr_in *addr)
 {
-    (void)signal;
-    stop = 1;
-}
-
-unsigned short checksum(void *b, int len)
-{
-    unsigned short *buf = b;
-    unsigned int sum = 0;
-    unsigned short result;
-
-    while (len > 1)
-    {
-        sum += *buf++;
-        len -= 2;
-    }
-    if (len == 1)
-        sum += *(unsigned char *)buf;
-    sum = (sum >> 16) + (sum & 0xFFFF);
-    sum += (sum >> 16);
-    result = ~sum;
-    return result;
-}
-
-static int opt_ttl = 64;
-
-static void print_help(const char *progname)
-{
-    printf("Usage: %s [OPTIONS] DESTINATION\n", progname);
-    printf("Send ICMP ECHO_REQUEST to network hosts.\n\n");
-    printf("Options:\n");
-    printf("  -t, --ttl=TTL       Set IP TTL (default %d)\n", opt_ttl);
-    printf("  -?, --help          Display this help and exit\n");
-}
-
-static int parse_opt(int key, const char *arg, struct argp_state *state)
-{
-    (void)state;
-    (void)arg;
-    switch (key)
-    {
-    case 't':
-        if (!arg)
-        {
-            fprintf(stderr, "--ttl requires a value\n");
-            return ARGP_ERR_ARG;
-        }
-        opt_ttl = atoi(arg);
-        if (opt_ttl <= 0 || opt_ttl > 255)
-        {
-            fprintf(stderr, "invalid ttl: %s\n", arg);
-            return ARGP_ERR_ARG;
-        }
-        break;
-    case '?':
-        print_help(state->argv[0]);
-        exit(0);
-        break;
-    default:
+    memset(addr, 0, sizeof(*addr));
+    addr->sin_family = AF_INET;
+    addr->sin_port = 0;
+    if (inet_pton(AF_INET, dest, &addr->sin_addr) == 1)
         return 0;
+
+    struct addrinfo hints;
+    struct addrinfo *res = NULL;
+    struct addrinfo *p = NULL;
+    int resolved = 0;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+
+    int gai = getaddrinfo(dest, NULL, &hints, &res);
+    if (gai != 0)
+    {
+        fprintf(stderr, "cannot resolve %s: %s\n", dest, gai_strerror(gai));
+        return -1;
+    }
+    for (p = res; p != NULL; p = p->ai_next)
+    {
+        if (p->ai_family == AF_INET && p->ai_addrlen >= sizeof(struct sockaddr_in))
+        {
+            struct sockaddr_in *sin = (struct sockaddr_in *)p->ai_addr;
+            addr->sin_addr = sin->sin_addr;
+            resolved = 1;
+            break;
+        }
+    }
+    freeaddrinfo(res);
+    if (!resolved)
+    {
+        fprintf(stderr, "no IPv4 address found for %s\n", dest);
+        return -1;
     }
     return 0;
 }
 
-int main(int argc, char **argv)
+static void print_ping_header(const char *dest, const struct sockaddr_in *addr)
 {
-    const struct argp_option options[] = {
-        {"ttl", 't', ARGP_REQUIRED_ARG, "Set IP TTL", 0},
-        {"help", '?', ARGP_NO_ARG, "Display this help", 0},
-        {NULL, 0, 0, NULL, 0}};
-
-    const struct argp argp = {options, parse_opt, "DEST", "ft_ping: send ICMP ECHO_REQUEST to network hosts"};
-
-    int arg_index = 0;
-    if (argp_parse(&argp, argc, argv, &arg_index, NULL) != ARGP_SUCCESS)
+    char dst_ip[INET_ADDRSTRLEN];
+    if (inet_ntop(AF_INET, &addr->sin_addr, dst_ip, sizeof(dst_ip)) == NULL)
     {
-        return EXIT_FAILURE;
-    }
-
-    if (arg_index >= argc)
-    {
-        print_help(argv[0]);
-        return EXIT_FAILURE;
-    }
-
-    const char *dest = argv[arg_index];
-
-    int sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP); // DGRAM doesn't require root privileges
-    if (sockfd == -1)
-    {
-        perror("socket");
+        perror("inet_ntop");
         exit(EXIT_FAILURE);
     }
+    int data_len = 64 - (int)sizeof(struct icmp);
+    printf("PING %s (%s): %d data bytes\n", dest, dst_ip, data_len);
+}
 
-    signal(SIGINT, sig_int);
-
-    struct sockaddr_in addr;
-
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = 0;
-    if (inet_pton(AF_INET, dest, &addr.sin_addr) != 1)
-    {
-        struct addrinfo hints;
-        struct addrinfo *res = NULL;
-        struct addrinfo *p = NULL;
-        int resolved = 0;
-
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_INET;
-
-        int gai = getaddrinfo(dest, NULL, &hints, &res);
-        if (gai != 0)
-        {
-            fprintf(stderr, "cannot resolve %s: %s\n", dest, gai_strerror(gai));
-            close(sockfd);
-            return EXIT_FAILURE;
-        }
-        for (p = res; p != NULL; p = p->ai_next)
-        {
-            if (p->ai_family == AF_INET && p->ai_addrlen >= sizeof(struct sockaddr_in))
-            {
-                struct sockaddr_in *sin = (struct sockaddr_in *)p->ai_addr;
-                addr.sin_addr = sin->sin_addr;
-                resolved = 1;
-                break;
-            }
-        }
-        freeaddrinfo(res);
-        if (!resolved)
-        {
-            fprintf(stderr, "no IPv4 address found for %s\n", dest);
-            close(sockfd);
-            return EXIT_FAILURE;
-        }
-    }
-
-    {
-        char dst_ip[INET_ADDRSTRLEN];
-        if (inet_ntop(AF_INET, &addr.sin_addr, dst_ip, sizeof(dst_ip)) == NULL)
-        {
-            perror("inet_ntop");
-            close(sockfd);
-            exit(EXIT_FAILURE);
-        }
-        int data_len = 64 - (int)sizeof(struct icmp);
-        printf("PING %s (%s): %d data bytes\n", dest, dst_ip, data_len);
-    }
-
+static int configure_socket(int sockfd, int ttl)
+{
     int broadcastEnable = 1;
     if (setsockopt(sockfd, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, sizeof(broadcastEnable)) < 0)
     {
         perror("setsockopt");
-        close(sockfd);
-        exit(EXIT_FAILURE);
+        return -1;
     }
-
-    if (setsockopt(sockfd, IPPROTO_IP, IP_TTL, &opt_ttl, sizeof(opt_ttl)) < 0)
+    if (setsockopt(sockfd, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl)) < 0)
     {
         perror("setsockopt");
-        close(sockfd);
-        exit(EXIT_FAILURE);
+        return -1;
     }
-
     int recv_ttl_opt = 1;
     if (setsockopt(sockfd, IPPROTO_IP, IP_RECVTTL, &recv_ttl_opt, sizeof(recv_ttl_opt)) < 0)
     {
         perror("setsockopt IP_RECVTTL");
-        close(sockfd);
-        exit(EXIT_FAILURE);
+        return -1;
     }
+    return 0;
+}
 
-    int transmitted = 0;
-    int received = 0;
-    double rtt_min = 1e9;
-    double rtt_max = 0.0;
-    double rtt_sum = 0.0;
-    double rtt_sum_sq = 0.0;
+static void run_ping_loop(int sockfd, const struct sockaddr_in *addr,
+                          int *transmitted, int *received,
+                          double *rtt_min, double *rtt_max,
+                          double *rtt_sum, double *rtt_sum_sq)
+{
     int seq = 0;
     while (!stop)
     {
@@ -216,14 +116,14 @@ int main(int argc, char **argv)
         
         icmp_hdr->icmp_cksum = checksum(packet, sizeof(packet));
 
-        int sent = sendto(sockfd, packet, sizeof(packet), 0, (struct sockaddr *)&addr, sizeof(addr));
+        int sent = sendto(sockfd, packet, sizeof(packet), 0, (const struct sockaddr *)addr, sizeof(*addr));
         if (sent == -1)
         {
             close(sockfd);
             perror("sendto");
             exit(EXIT_FAILURE);
         }
-        transmitted++;
+        (*transmitted)++;
 
         struct sockaddr_in reply_addr;
         unsigned char buf[1024];
@@ -280,11 +180,11 @@ int main(int argc, char **argv)
             double rtt_ms = (now.tv_sec - tv_send->tv_sec) * 1000.0 +
                             (now.tv_usec - tv_send->tv_usec) / 1000.0;
 
-            received++;
-            if (rtt_ms < rtt_min) rtt_min = rtt_ms;
-            if (rtt_ms > rtt_max) rtt_max = rtt_ms;
-            rtt_sum += rtt_ms;
-            rtt_sum_sq += rtt_ms * rtt_ms;
+            (*received)++;
+            if (rtt_ms < *rtt_min) *rtt_min = rtt_ms;
+            if (rtt_ms > *rtt_max) *rtt_max = rtt_ms;
+            *rtt_sum += rtt_ms;
+            *rtt_sum_sq += rtt_ms * rtt_ms;
             printf("%d bytes from %s: icmp_seq=%u ttl=%d time=%.3f ms\n",
                    n,
                    inet_ntoa(reply_addr.sin_addr),
@@ -294,6 +194,12 @@ int main(int argc, char **argv)
         }
         sleep(1);
     }
+}
+
+static void print_statistics(const char *dest, int transmitted, int received,
+                             double rtt_min, double rtt_max,
+                             double rtt_sum, double rtt_sum_sq)
+{
     printf("--- %s ping statistics ---\n", dest);
     if (transmitted > 0)
     {
@@ -314,6 +220,64 @@ int main(int argc, char **argv)
         printf("round-trip min/avg/max/stddev = %.3f/%.3f/%.3f/%.3f ms\n",
                rtt_min, avg, rtt_max, stddev);
     }
+}
+
+int main(int argc, char **argv)
+{
+    const struct argp_option options[] = {
+        {"ttl", 't', ARGP_REQUIRED_ARG, "Set IP TTL", 0},
+        {"help", '?', ARGP_NO_ARG, "Display this help", 0},
+        {NULL, 0, 0, NULL, 0}};
+
+    const struct argp argp = {options, parse_opt, "DEST", "ft_ping: send ICMP ECHO_REQUEST to network hosts"};
+
+    int arg_index = 0;
+    if (argp_parse(&argp, argc, argv, &arg_index, NULL) != ARGP_SUCCESS)
+    {
+        return EXIT_FAILURE;
+    }
+
+    if (arg_index >= argc)
+    {
+        print_help(argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    const char *dest = argv[arg_index];
+
+    int sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP); // DGRAM doesn't require root privileges
+    if (sockfd == -1)
+    {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+    signal(SIGINT, sig_int);
+
+    struct sockaddr_in addr;
+
+    if (resolve_destination(dest, &addr) != 0)
+    {
+        close(sockfd);
+        return EXIT_FAILURE;
+    }
+
+    print_ping_header(dest, &addr);
+
+    if (configure_socket(sockfd, opt_ttl) != 0)
+    {
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    int transmitted = 0;
+    int received = 0;
+    double rtt_min = 1e9;
+    double rtt_max = 0.0;
+    double rtt_sum = 0.0;
+    double rtt_sum_sq = 0.0;
+    run_ping_loop(sockfd, &addr, &transmitted, &received, &rtt_min, &rtt_max, &rtt_sum, &rtt_sum_sq);
+    print_statistics(dest, transmitted, received, rtt_min, rtt_max, rtt_sum, rtt_sum_sq);
     close(sockfd);
     return EXIT_SUCCESS;
 }
