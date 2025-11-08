@@ -11,7 +11,10 @@
 #include <unistd.h>
 #include <string.h>
 #include <signal.h>
+#include <netdb.h>
 #include "argp.h"
+#include <errno.h>
+#include <math.h>
 
 int volatile stop = 0;
 
@@ -119,9 +122,50 @@ int main(int argc, char **argv)
     addr.sin_port = 0;
     if (inet_pton(AF_INET, dest, &addr.sin_addr) != 1)
     {
-        fprintf(stderr, "Invalid destination address: %s\n", dest);
-        close(sockfd);
-        return EXIT_FAILURE;
+        struct addrinfo hints;
+        struct addrinfo *res = NULL;
+        struct addrinfo *p = NULL;
+        int resolved = 0;
+
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+
+        int gai = getaddrinfo(dest, NULL, &hints, &res);
+        if (gai != 0)
+        {
+            fprintf(stderr, "cannot resolve %s: %s\n", dest, gai_strerror(gai));
+            close(sockfd);
+            return EXIT_FAILURE;
+        }
+        for (p = res; p != NULL; p = p->ai_next)
+        {
+            if (p->ai_family == AF_INET && p->ai_addrlen >= sizeof(struct sockaddr_in))
+            {
+                struct sockaddr_in *sin = (struct sockaddr_in *)p->ai_addr;
+                addr.sin_addr = sin->sin_addr;
+                resolved = 1;
+                break;
+            }
+        }
+        freeaddrinfo(res);
+        if (!resolved)
+        {
+            fprintf(stderr, "no IPv4 address found for %s\n", dest);
+            close(sockfd);
+            return EXIT_FAILURE;
+        }
+    }
+
+    {
+        char dst_ip[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &addr.sin_addr, dst_ip, sizeof(dst_ip)) == NULL)
+        {
+            perror("inet_ntop");
+            close(sockfd);
+            exit(EXIT_FAILURE);
+        }
+        int data_len = 64 - (int)sizeof(struct icmp);
+        printf("PING %s (%s): %d data bytes\n", dest, dst_ip, data_len);
     }
 
     int broadcastEnable = 1;
@@ -147,6 +191,12 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
+    int transmitted = 0;
+    int received = 0;
+    double rtt_min = 1e9;
+    double rtt_max = 0.0;
+    double rtt_sum = 0.0;
+    double rtt_sum_sq = 0.0;
     int seq = 0;
     while (!stop)
     {
@@ -173,6 +223,7 @@ int main(int argc, char **argv)
             perror("sendto");
             exit(EXIT_FAILURE);
         }
+        transmitted++;
 
         struct sockaddr_in reply_addr;
         unsigned char buf[1024];
@@ -198,6 +249,10 @@ int main(int argc, char **argv)
 
         if (n < 0)
         {
+            if (errno == EINTR && stop)
+                break;
+            if (errno == EINTR)
+                continue;
             perror("recvmsg");
             close(sockfd);
             exit(EXIT_FAILURE);
@@ -225,6 +280,11 @@ int main(int argc, char **argv)
             double rtt_ms = (now.tv_sec - tv_send->tv_sec) * 1000.0 +
                             (now.tv_usec - tv_send->tv_usec) / 1000.0;
 
+            received++;
+            if (rtt_ms < rtt_min) rtt_min = rtt_ms;
+            if (rtt_ms > rtt_max) rtt_max = rtt_ms;
+            rtt_sum += rtt_ms;
+            rtt_sum_sq += rtt_ms * rtt_ms;
             printf("%d bytes from %s: icmp_seq=%u ttl=%d time=%.3f ms\n",
                    n,
                    inet_ntoa(reply_addr.sin_addr),
@@ -233,6 +293,26 @@ int main(int argc, char **argv)
                    rtt_ms);
         }
         sleep(1);
+    }
+    printf("--- %s ping statistics ---\n", dest);
+    if (transmitted > 0)
+    {
+        int loss = (int)(((transmitted - received) * 100) / transmitted);
+        printf("%d packets transmitted, %d packets received, %d%% packet loss\n",
+               transmitted, received, loss);
+    }
+    else
+    {
+        printf("0 packets transmitted, 0 packets received, 0%% packet loss\n");
+    }
+    if (received > 0)
+    {
+        double avg = rtt_sum / received;
+        double variance = (rtt_sum_sq / received) - (avg * avg);
+        if (variance < 0.0) variance = 0.0;
+        double stddev = sqrt(variance);
+        printf("round-trip min/avg/max/stddev = %.3f/%.3f/%.3f/%.3f ms\n",
+               rtt_min, avg, rtt_max, stddev);
     }
     close(sockfd);
     return EXIT_SUCCESS;

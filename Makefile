@@ -10,7 +10,7 @@ arg ?= -V
 all: $(TARGET)
 
 $(TARGET): $(OBJ)
-	gcc $(OBJ) -o $(TARGET)
+	gcc $(OBJ) -o $(TARGET) -lm
 
 $(OBJ_DIR)/%.o: %.c
 	@mkdir -p $(OBJ_DIR)
