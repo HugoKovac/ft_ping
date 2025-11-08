@@ -1,8 +1,7 @@
 #include <stdio.h>
 #include <sys/types.h>
-#include <stdio.h>
-#include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <netinet/ip_icmp.h>
 #include <netinet/ip.h>
@@ -37,14 +36,14 @@ unsigned short checksum(void *b, int len)
     return result;
 }
 
-// static int opt_ttl = 64;
+static int opt_ttl = 64;
 
 static void print_help(const char *progname)
 {
     printf("Usage: %s [OPTIONS] DESTINATION\n", progname);
     printf("Send ICMP ECHO_REQUEST to network hosts.\n\n");
     printf("Options:\n");
-    // printf("  -t, --ttl=TTL       Set IP TTL (default %d)\n", opt_ttl);
+    printf("  -t, --ttl=TTL       Set IP TTL (default %d)\n", opt_ttl);
     printf("  -?, --help          Display this help and exit\n");
 }
 
@@ -54,19 +53,19 @@ static int parse_opt(int key, const char *arg, struct argp_state *state)
     (void)arg;
     switch (key)
     {
-    // case 't':
-    //     if (!arg)
-    //     {
-    //         fprintf(stderr, "--ttl requires a value\n");
-    //         return ARGP_ERR_ARG;
-    //     }
-    //     opt_ttl = atoi(arg);
-    //     if (opt_ttl <= 0 || opt_ttl > 255)
-    //     {
-    //         fprintf(stderr, "invalid ttl: %s\n", arg);
-    //         return ARGP_ERR_ARG;
-    //     }
-    //     break;
+    case 't':
+        if (!arg)
+        {
+            fprintf(stderr, "--ttl requires a value\n");
+            return ARGP_ERR_ARG;
+        }
+        opt_ttl = atoi(arg);
+        if (opt_ttl <= 0 || opt_ttl > 255)
+        {
+            fprintf(stderr, "invalid ttl: %s\n", arg);
+            return ARGP_ERR_ARG;
+        }
+        break;
     case '?':
         print_help(state->argv[0]);
         exit(0);
@@ -119,34 +118,41 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    // int broadcastEnable = 1;
-    // if (setsockopt(sockfd, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, sizeof(broadcastEnable)) < 0)
-    // {
-    //     perror("setsockopt");
-    //     close(sockfd);
-    //     exit(EXIT_FAILURE);
-    // }
+    int broadcastEnable = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, sizeof(broadcastEnable)) < 0)
+    {
+        perror("setsockopt");
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
 
-    // if (setsockopt(sockfd, IPPROTO_IP, IP_TTL, &opt_ttl, sizeof(opt_ttl)) < 0)
-    // {
-    //     perror("setsockopt");
-    //     close(sockfd);
-    //     exit(EXIT_FAILURE);
-    // }
+    if (setsockopt(sockfd, IPPROTO_IP, IP_TTL, &opt_ttl, sizeof(opt_ttl)) < 0)
+    {
+        perror("setsockopt");
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
 
     int seq = 0;
     while (!stop)
     {
-        struct icmp icmp_hdr;
+        unsigned char packet[64];
+        struct icmp *icmp_hdr = (struct icmp *)packet;
+        struct timeval *tv = (struct timeval *)(packet + sizeof(struct icmp));
 
-        icmp_hdr.icmp_type = ICMP_ECHO;
-        icmp_hdr.icmp_code = 0;
-        icmp_hdr.icmp_cksum = 0;
-        icmp_hdr.icmp_hun.ih_idseq.icd_id = htons((uint16_t)(getpid() & 0xFFFF));
-        icmp_hdr.icmp_hun.ih_idseq.icd_seq = htons(seq++);
-        icmp_hdr.icmp_cksum = checksum(&icmp_hdr, sizeof(icmp_hdr));
+        memset(packet, 0, sizeof(packet));
+        
+        icmp_hdr->icmp_type = ICMP_ECHO;
+        icmp_hdr->icmp_code = 0;
+        icmp_hdr->icmp_cksum = 0;
+        icmp_hdr->icmp_hun.ih_idseq.icd_id = htons((uint16_t)(getpid() & 0xFFFF));
+        icmp_hdr->icmp_hun.ih_idseq.icd_seq = htons(seq++);
+        
+        gettimeofday(tv, NULL);
+        
+        icmp_hdr->icmp_cksum = checksum(packet, sizeof(packet));
 
-        int sent = sendto(sockfd, &icmp_hdr, sizeof(icmp_hdr), 0, (struct sockaddr *)&addr, sizeof(addr));
+        int sent = sendto(sockfd, packet, sizeof(packet), 0, (struct sockaddr *)&addr, sizeof(addr));
         if (sent == -1)
         {
             close(sockfd);
@@ -171,30 +177,19 @@ int main(int argc, char **argv)
         struct ip *ip_hdr = (struct ip *)buf;
         int iphdrlen = ip_hdr->ip_hl * 4;
 
-        if (n < iphdrlen + (int)sizeof(struct icmp))
-        {
-            fprintf(stderr, "Received packet too short (%d bytes)\n", n);
-            close(sockfd);
-            exit(EXIT_FAILURE);
-        }
-
         struct icmp *icmp_reply = (struct icmp *)(buf + iphdrlen);
 
         if (icmp_reply->icmp_type == ICMP_ECHOREPLY)
         {
-            printf("%d bytes from %s: icmp_seq=%u", 0, inet_ntoa(*(struct in_addr *)&reply_addr.sin_addr.s_addr), ntohs(icmp_reply->icmp_seq));
-            printf(" ttl=%d", ip_hdr->ip_ttl);
-            printf("\n");
-            // printf("id=%d seq=%d ttl=%d\n",
-            //        ntohs(icmp_reply->icmp_hun.ih_idseq.icd_id),
-            //        ntohs(icmp_reply->icmp_hun.ih_idseq.icd_seq),
-            //        ip_hdr->ip_ttl);
-        }
-        else
-        {
-            printf("Reçu autre type ICMP : %d\n", icmp_reply->icmp_type);
+            
+            printf("%zu bytes from %s: icmp_seq=%u ttl=%d time=%.3f ms\n",
+                (size_t)(n - iphdrlen),
+                inet_ntoa(*(struct in_addr *)&reply_addr.sin_addr.s_addr),
+                ntohs(icmp_reply->icmp_seq),
+                ip_hdr->ip_ttl, (double)(tv->tv_usec - icmp_hdr->icmp_hun.ih_idseq.icd_id) / 1000.0);
         }
         sleep(1);
     }
     close(sockfd);
+    return EXIT_SUCCESS;
 }
