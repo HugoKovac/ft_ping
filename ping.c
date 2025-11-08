@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <signal.h>
 #include "argp.h"
 
 int volatile stop = 0;
@@ -26,8 +27,11 @@ unsigned short checksum(void *b, int len)
     unsigned int sum = 0;
     unsigned short result;
 
-    for (sum = 0; len > 1; len -= 2)
+    while (len > 1)
+    {
         sum += *buf++;
+        len -= 2;
+    }
     if (len == 1)
         sum += *(unsigned char *)buf;
     sum = (sum >> 16) + (sum & 0xFFFF);
@@ -106,6 +110,8 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
+    signal(SIGINT, sig_int);
+
     struct sockaddr_in addr;
 
     memset(&addr, 0, sizeof(addr));
@@ -129,6 +135,14 @@ int main(int argc, char **argv)
     if (setsockopt(sockfd, IPPROTO_IP, IP_TTL, &opt_ttl, sizeof(opt_ttl)) < 0)
     {
         perror("setsockopt");
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    int recv_ttl_opt = 1;
+    if (setsockopt(sockfd, IPPROTO_IP, IP_RECVTTL, &recv_ttl_opt, sizeof(recv_ttl_opt)) < 0)
+    {
+        perror("setsockopt IP_RECVTTL");
         close(sockfd);
         exit(EXIT_FAILURE);
     }
@@ -161,32 +175,62 @@ int main(int argc, char **argv)
         }
 
         struct sockaddr_in reply_addr;
-        socklen_t addrlen = sizeof(reply_addr);
         unsigned char buf[1024];
+        struct iovec iov;
+        struct msghdr msg;
+        char cbuf[CMSG_SPACE(sizeof(int))];
 
-        int n = recvfrom(sockfd, buf, sizeof(buf), 0,
-                         (struct sockaddr *)&reply_addr, &addrlen);
+        memset(&reply_addr, 0, sizeof(reply_addr));
+        memset(&iov, 0, sizeof(iov));
+        memset(&msg, 0, sizeof(msg));
+        memset(cbuf, 0, sizeof(cbuf));
+
+        iov.iov_base = buf;
+        iov.iov_len = sizeof(buf);
+        msg.msg_name = &reply_addr;
+        msg.msg_namelen = sizeof(reply_addr);
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = cbuf;
+        msg.msg_controllen = sizeof(cbuf);
+
+        int n = recvmsg(sockfd, &msg, 0);
 
         if (n < 0)
         {
-            perror("recvfrom");
+            perror("recvmsg");
             close(sockfd);
             exit(EXIT_FAILURE);
         }
 
-        struct ip *ip_hdr = (struct ip *)buf;
-        int iphdrlen = ip_hdr->ip_hl * 4;
+        int recv_ttl = -1;
+        struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+        while (cmsg != NULL)
+        {
+            if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_TTL)
+            {
+                memcpy(&recv_ttl, CMSG_DATA(cmsg), sizeof(recv_ttl));
+                break;
+            }
+            cmsg = CMSG_NXTHDR(&msg, cmsg);
+        }
 
-        struct icmp *icmp_reply = (struct icmp *)(buf + iphdrlen);
+        struct icmp *icmp_reply = (struct icmp *)buf;
 
         if (icmp_reply->icmp_type == ICMP_ECHOREPLY)
         {
-            
-            printf("%zu bytes from %s: icmp_seq=%u ttl=%d time=%.3f ms\n",
-                (size_t)(n - iphdrlen),
-                inet_ntoa(*(struct in_addr *)&reply_addr.sin_addr.s_addr),
-                ntohs(icmp_reply->icmp_seq),
-                ip_hdr->ip_ttl, (double)(tv->tv_usec - icmp_hdr->icmp_hun.ih_idseq.icd_id) / 1000.0);
+            struct timeval *tv_send = (struct timeval *)(buf + sizeof(struct icmp));
+            struct timeval now;
+            gettimeofday(&now, NULL);
+            double rtt_ms = (now.tv_sec - tv_send->tv_sec) * 1000.0 +
+                            (now.tv_usec - tv_send->tv_usec) / 1000.0;
+
+            printf("%d bytes from %s: icmp_seq=%u ttl=%d time=%.3f ms\n",
+                   n,
+                   inet_ntoa(reply_addr.sin_addr),
+                   ntohs(icmp_reply->icmp_seq),
+                   (recv_ttl >= 0 ? recv_ttl : 0),
+                   rtt_ms);
         }
         sleep(1);
     }
